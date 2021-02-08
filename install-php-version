@@ -1,0 +1,173 @@
+#!/bin/bash
+#from https://www.howtoforge.com/tutorial/how-to-install-php-7-on-debian
+#check argument
+help="-v: PHP version number as coded into PHP packages downloadable at https://www.php.net/downloads.php (mandatory)
+\n-e: PHP configure extra options, must be enclosed by quotes"
+while getopts v:e:h option
+do
+	case "${option}"
+	in
+	v) version=${OPTARG};;
+	e) extraOptions=${OPTARG};;
+	h) echo -e $help
+	exit;;
+	esac
+done
+if [ -z "$version" ]
+	then
+		echo "argument-v needed: PHP version number as coded into PHP packages downloadable at https://www.php.net/downloads.php"
+		exit 1
+else
+	#check version
+	downloadUrl=https://www.php.net/distributions/php-"$version".tar.bz2
+	echo $downloadUrl
+	if curl --output /dev/null --silent --head --fail "$downloadUrl"; then
+		echo "Download URL exists: $downloadUrl"
+	else
+		echo "Download URL does not exist: $downloadUrl"
+		exit 1
+	fi
+	ports=($(sed -rn 's/listen = 127.0.0.1:([0-9]{4})/\1/p' /opt/php-*/etc/php-fpm.d/www.conf))
+	port=0
+	for i in "${ports[@]}"
+	do
+		if [ "$port" == "0" -o "$port" -gt "$i" ]; then
+			port=$i
+		fi
+	done
+	port=$((port-1))
+	echo "found port $port"
+fi
+mkdir -p /opt/php-$version
+mkdir /usr/local/src/php"$version"-build
+cd /usr/local/src/php"$version"-build
+wget https://www.php.net/distributions/php-"$version".tar.bz2 -O php-"$version".tar.bz2
+tar jxf php-"$version".tar.bz2
+cd php-"$version"
+./configure --prefix=/opt/php-"$version" --with-pdo-pgsql --with-zlib-dir --with-freetype-dir --enable-mbstring --with-libxml-dir=/usr --enable-soap --enable-calendar --with-curl --with-zlib --with-gd --with-pgsql --disable-rpath --enable-inline-optimization --with-bz2 --with-zlib --enable-sockets --enable-sysvsem --enable-sysvshm --enable-pcntl --enable-mbregex --enable-exif --enable-bcmath --with-mhash --enable-zip --with-pcre-regex --with-pdo-mysql --with-mysqli --with-mysql-sock=/var/run/mysqld/mysqld.sock --with-jpeg-dir=/usr --with-png-dir=/usr --with-openssl --with-fpm-user=www-data --with-fpm-group=www-data --with-libdir=/lib/x86_64-linux-gnu --enable-ftp --with-imap --with-imap-ssl --with-kerberos --with-gettext --with-xmlrpc --with-xsl --enable-opcache --enable-fpm "$extraOptions"
+make
+make install
+cp /usr/local/src/php"$version"-build/php-"$version"/php.ini-production /opt/php-"$version"/lib/php.ini
+echo "zend_extension=opcache.so" >> /opt/php-"$version"/lib/php.ini
+cp /opt/php-"$version"/etc/php-fpm.conf.default /opt/php-"$version"/etc/php-fpm.conf
+cp /opt/php-"$version"/etc/php-fpm.d/www.conf.default /opt/php-"$version"/etc/php-fpm.d/www.conf
+sed -i 's/;pid = run\/php-fpm.pid/pid = run\/php-fpm.pid/' /opt/php-"$version"/etc/php-fpm.conf
+sed -i -r "s/listen = 127.0.0.1:([0-9]{4})/listen = 127.0.0.1:$port/" /opt/php-"$version"/etc/php-fpm.d/www.conf
+cat > /etc/init.d/php-"$version"-fpm << EOF
+#! /bin/sh
+### BEGIN INIT INFO
+# Provides:          php-$version-fpm
+# Required-Start:    \$all
+# Required-Stop:     \$all
+# Default-Start:     2 3 4 5
+# Default-Stop:      0 1 6
+# Short-Description: starts php-$version-fpm
+# Description:       starts the PHP FastCGI Process Manager daemon
+### END INIT INFO
+php_fpm_BIN=/opt/php-$version/sbin/php-fpm
+php_fpm_CONF=/opt/php-$version/etc/php-fpm.conf
+php_fpm_PID=/opt/php-$version/var/run/php-fpm.pid
+php_opts="--fpm-config \$php_fpm_CONF"
+wait_for_pid () {
+        try=0
+        while test \$try -lt 35 ; do
+                case "\$1" in
+                        'created')
+                        if [ -f "\$2" ] ; then
+                                try=''
+                                break
+                        fi
+                        ;;
+                        'removed')
+                        if [ ! -f "\$2" ] ; then
+                                try=''
+                                break
+                        fi
+                        ;;
+                esac
+                echo -n .
+                try=\`expr \$try + 1\`
+                sleep 1
+        done
+}
+case "\$1" in
+        start)
+                echo -n "Starting php-fpm "
+                \$php_fpm_BIN \$php_opts
+                if [ "\$?" != 0 ] ; then
+                        echo " failed"
+                        exit 1
+                fi
+                wait_for_pid created \$php_fpm_PID
+
+                if [ -n "\$try" ] ; then
+                        echo " failed"
+                        exit 1
+                else
+                        echo " done"
+                fi
+        ;;
+        stop)
+                echo -n "Gracefully shutting down php-fpm "
+                if [ ! -r \$php_fpm_PID ] ; then
+                        echo "warning, no pid file found - php-fpm is not running ?"
+                        exit 1
+                fi
+                kill -QUIT \`cat \$php_fpm_PID\`
+                wait_for_pid removed \$php_fpm_PID
+                if [ -n "\$try" ] ; then
+                        echo " failed. Use force-exit"
+                        exit 1
+                else
+                        echo " done"
+                       echo " done"
+                fi
+        ;;
+        force-quit)
+                echo -n "Terminating php-fpm "
+                if [ ! -r \$php_fpm_PID ] ; then
+                        echo "warning, no pid file found - php-fpm is not running ?"
+                        exit 1
+                fi
+                kill -TERM \`cat \$php_fpm_PID\`
+                wait_for_pid removed \$php_fpm_PID
+                if [ -n "\$try" ] ; then
+                        echo " failed"
+                        exit 1
+                else
+                        echo " done"
+                fi
+        ;;
+        restart)
+                \$0 stop
+                \$0 start
+        ;;
+        reload)
+                echo -n "Reload service php-fpm "
+                if [ ! -r \$php_fpm_PID ] ; then
+                        echo "warning, no pid file found - php-fpm is not running ?"
+                        exit 1
+                fi
+                kill -USR2 \`cat \$php_fpm_PID\`
+                echo " done"
+        ;;
+        *)
+                echo "Usage: \$0 {start|stop|force-quit|restart|reload}"
+                exit 1
+        ;;
+esac
+EOF
+chmod 755 /etc/init.d/php-"$version"-fpm
+update-rc.d php-"$version"-fpm defaults
+/etc/init.d/php-"$version"-fpm start
+echo "
+Add the new PHP version to ISPConfig under System > Additional PHP Versions:"
+echo "PHP Name: PHP $version"
+echo "FastCGI Settings:"
+echo "Path to the PHP FastCGI binary: /opt/php-$version/bin/php-cgi"
+echo "Path to the php.ini directory: /opt/php-$version/lib"
+echo "PHP-FPM Settings:"
+echo "Path to the PHP-FPM init script: php-$version-fpm"
+echo "Path to the php.ini directory: /opt/php-$version/lib"
+echo "Path to the PHP-FPM pool directory: /opt/php-$version/etc/php-fpm.d"
+exit 0
